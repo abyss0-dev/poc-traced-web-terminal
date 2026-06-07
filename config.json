@@ -1,0 +1,50 @@
+{
+  "runtime": "qemu",
+  "targets": [
+    {
+      "id": "vm1",
+      "label": "vm1",
+      "host": "127.0.0.1",
+      "port": 2222,
+      "user": "poc",
+      "password": "poc",
+      "image": "vm/overlay-vm1.qcow2",
+      "seed": "vm/seed-vm1.img",
+      "sshPort": 2222,
+      "memory": "1024"
+    },
+    {
+      "id": "vm2",
+      "label": "vm2",
+      "host": "127.0.0.1",
+      "port": 2223,
+      "user": "poc",
+      "password": "poc",
+      "image": "vm/overlay-vm2.qcow2",
+      "seed": "vm/seed-vm2.img",
+      "sshPort": 2223,
+      "memory": "1024"
+    },
+    {
+      "id": "vm3",
+      "label": "vm3",
+      "host": "127.0.0.1",
+      "port": 2224,
+      "user": "poc",
+      "password": "poc",
+      "image": "vm/overlay-vm3.qcow2",
+      "seed": "vm/seed-vm3.img",
+      "sshPort": 2224,
+      "memory": "1024"
+    }
+  ],
+  "trace": {
+    "enabled": true,
+    "logPath": "/var/log/bloodhound.ndjson",
+    "operatorUid": 1000,
+    "watcher": {
+      "user": "watcher",
+      "password": "watch"
+    }
+  }
+}

@@ -1,0 +1,9 @@
+# VM artifacts (built by vm/fetch-image.sh)
+vm/base/
+vm/overlay-*.qcow2
+vm/seed-*.img
+
+# Built binaries
+/gw
+/bff
+/bin/

@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Traced Web Terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; height: 100vh; display: flex; flex-direction: column;
+      background: #1e1e1e; color: #ddd;
+      font: 14px/1.4 system-ui, sans-serif;
+    }
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 8px 12px; background: #252526; border-bottom: 1px solid #333;
+    }
+    header h1 { font-size: 14px; margin: 0; font-weight: 600; }
+    #targets { display: flex; gap: 8px; flex-wrap: wrap; }
+    .target {
+      display: flex; align-items: center; gap: 6px;
+      padding: 4px 10px; border: 1px solid #444; border-radius: 4px;
+      background: #2d2d2d; cursor: pointer; user-select: none;
+    }
+    .target[disabled] { opacity: 0.45; cursor: not-allowed; }
+    .target.active { border-color: #0a84ff; background: #0a3a66; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #888; }
+    .dot.ready { background: #2ecc71; }
+    .dot.booting { background: #f1c40f; }
+    .dot.error { background: #e74c3c; }
+    #status { margin-left: auto; color: #999; }
+
+    /* Body split: trace pane (left) | terminal (right) */
+    #body { flex: 1; min-height: 0; display: flex; }
+    #trace-pane {
+      width: 50%; min-width: 0; display: flex; flex-direction: column;
+      border-right: 1px solid #333; background: #181818;
+    }
+    #trace-bar {
+      display: flex; align-items: center; gap: 8px;
+      padding: 4px 8px; background: #232323; border-bottom: 1px solid #2c2c2c;
+      font-size: 12px;
+    }
+    #trace-bar .title { font-weight: 600; color: #bbb; margin-right: auto; }
+    #trace-bar button, #trace-types summary {
+      padding: 2px 8px; border: 1px solid #555; border-radius: 4px;
+      background: #2d2d2d; color: #ddd; cursor: pointer; font-size: 12px; list-style: none;
+    }
+    #trace-bar button:hover, #trace-types summary:hover { background: #3a3a3a; }
+    #trace-bar button.on { border-color: #0a84ff; background: #0a3a66; }
+    #trace-bar input {
+      width: 170px; padding: 2px 6px; border: 1px solid #555; border-radius: 4px;
+      background: #1e1e1e; color: #ddd; font: 12px ui-monospace, monospace; outline: none;
+    }
+    #trace-bar input:focus { border-color: #0a84ff; }
+    #trace-types { position: relative; }
+    #trace-types summary::-webkit-details-marker { display: none; }
+    #trace-types .menu {
+      position: absolute; right: 0; top: 24px; z-index: 40; min-width: 150px;
+      padding: 6px; background: #2a2a2b; border: 1px solid #454545; border-radius: 6px;
+      box-shadow: 0 6px 22px rgba(0,0,0,0.55);
+    }
+    #trace-types .menu label { display: flex; gap: 8px; padding: 3px 4px; cursor: pointer; }
+    #trace-log {
+      flex: 1; min-height: 0; overflow: auto; padding: 4px 8px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    /* Command anchor (execve): a prominent section header that opens a command's
+       story; the left border is tinted by the process colour. */
+    .trace-cmd {
+      display: flex; align-items: baseline; gap: 8px;
+      margin: 6px 0 0; padding: 2px 6px 2px 8px;
+      border-left: 3px solid #666; background: #202020; border-radius: 0 3px 3px 0;
+      font-weight: 600;
+    }
+    .trace-cmd .ci { color: #dcdcaa; }
+    .trace-cmd .cmd { color: #ececec; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .trace-cmd .proc { color: #8a8a8a; font-weight: 400; font-size: 11px; }
+    .trace-cmd .time { color: #5f5f5f; font-weight: 400; font-size: 11px; }
+    /* Child event row: indented under its command, tinted by process colour. */
+    .trace-ev {
+      display: flex; align-items: baseline; gap: 8px;
+      margin-left: 10px; padding: 1px 6px 1px 10px; border-left: 2px solid #3a3a3a;
+    }
+    .trace-ev .ci { width: 1.3em; text-align: center; flex: none; }
+    .trace-ev .nm { width: 9ch; flex: none; color: #9cdcfe; }
+    .trace-ev .dt { flex: 1; min-width: 0; color: #cfcfcf; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .trace-ev .proc { color: #777; font-size: 11px; flex: none; }
+    .trace-ev.t-TTY .nm       { color: #c586c0; }
+    .trace-ev.t-PACKET .nm    { color: #4ec9b0; }
+    .trace-ev.t-LSM .nm       { color: #f1c40f; }
+    .trace-ev.t-LIFECYCLE .nm { color: #6a9955; }
+    .trace-ev.t-META .nm      { color: #808080; }
+    .rc { flex: none; font-size: 11px; padding: 0 4px; border-radius: 3px; }
+    .rc.ok  { color: #6a9955; }
+    .rc.err { color: #f44747; background: #3a1c1c; }
+    .trace-line.raw { color: #9a9a9a; white-space: pre-wrap; word-break: break-all; }
+    #trace-status {
+      display: flex; align-items: center; gap: 14px;
+      padding: 4px 8px; background: #232323; border-top: 1px solid #2c2c2c;
+      font-size: 12px; color: #aaa;
+    }
+    #trace-alive { display: flex; align-items: center; gap: 6px; }
+    #trace-alive .dot { background: #888; }
+    #trace-alive.live .dot { background: #2ecc71; }
+    #trace-alive.dead .dot { background: #e74c3c; }
+
+    #term-wrap { flex: 1; min-width: 0; position: relative; }
+    #term { position: absolute; inset: 0; padding: 4px; }
+
+    /* In-terminal search overlay (Ctrl+Shift+F) */
+    #search {
+      position: absolute; top: 8px; right: 16px; z-index: 20;
+      display: none; align-items: center; gap: 6px;
+      padding: 6px 8px; background: #252526; border: 1px solid #444;
+      border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+    }
+    #search.open { display: flex; }
+    #search input {
+      width: 200px; padding: 4px 6px; border: 1px solid #555; border-radius: 4px;
+      background: #1e1e1e; color: #ddd; font: 13px ui-monospace, monospace; outline: none;
+    }
+    #search input:focus { border-color: #0a84ff; }
+    #search button {
+      padding: 3px 8px; border: 1px solid #555; border-radius: 4px;
+      background: #2d2d2d; color: #ddd; cursor: pointer; font-size: 13px; line-height: 1;
+    }
+    #search button:hover { background: #3a3a3a; }
+    #search .count { color: #999; font-size: 12px; min-width: 64px; text-align: right; }
+
+    /* Right-click context menu */
+    #menu {
+      position: absolute; z-index: 30; display: none; min-width: 150px;
+      padding: 4px; background: #2a2a2b; border: 1px solid #454545;
+      border-radius: 6px; box-shadow: 0 6px 22px rgba(0,0,0,0.55);
+    }
+    #menu.open { display: block; }
+    #menu .item {
+      display: flex; justify-content: space-between; gap: 16px;
+      padding: 6px 10px; border-radius: 4px; cursor: pointer; user-select: none;
+      font-size: 13px; color: #ddd;
+    }
+    #menu .item:hover { background: #0a3a66; }
+    #menu .item[aria-disabled="true"] { opacity: 0.4; pointer-events: none; }
+    #menu .item .key { color: #888; font-size: 12px; }
+    #menu .sep { height: 1px; margin: 4px 6px; background: #444; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Traced Web Terminal</h1>
+    <div id="targets"></div>
+    <span id="status">loading targets…</span>
+  </header>
+
+  <div id="body">
+    <!-- Left: live trace log -->
+    <section id="trace-pane">
+      <div id="trace-bar">
+        <span class="title">Trace (live)</span>
+        <input id="trace-filter" type="text" placeholder="filter: path / pid / comm" spellcheck="false" autocomplete="off" />
+        <button id="trace-shell" class="on" title="Hide shell housekeeping syscalls (execve stays)">hide&nbsp;shell</button>
+        <button id="trace-pause" title="Freeze the view (keeps capturing)">pause</button>
+        <button id="trace-clear" title="Clear the visible log">clear</button>
+        <button id="trace-raw" title="Show the raw NDJSON line">raw</button>
+        <details id="trace-types">
+          <summary>types</summary>
+          <div class="menu" id="trace-types-menu"></div>
+        </details>
+        <button id="trace-export" title="Download the captured .ndjson">export</button>
+      </div>
+      <div id="trace-log"></div>
+      <div id="trace-status">
+        <span id="trace-alive"><span class="dot"></span><span id="trace-alive-text">tracer —</span></span>
+        <span>emitted <span id="trace-emitted">0</span></span>
+        <span>drops <span id="trace-drops">0</span></span>
+      </div>
+    </section>
+
+    <!-- Right: interactive terminal -->
+    <div id="term-wrap">
+      <div id="term"></div>
+      <div id="search">
+        <input id="search-input" type="text" placeholder="Find" spellcheck="false" autocomplete="off" />
+        <span class="count" id="search-count"></span>
+        <button id="search-prev" title="Previous (Shift+Enter)">↑</button>
+        <button id="search-next" title="Next (Enter)">↓</button>
+        <button id="search-close" title="Close (Esc)">✕</button>
+      </div>
+      <div id="menu">
+        <div class="item" data-action="copy"><span>Copy</span><span class="key">Ctrl+C</span></div>
+        <div class="item" data-action="paste"><span>Paste</span><span class="key">Ctrl+V</span></div>
+        <div class="sep"></div>
+        <div class="item" data-action="selectAll"><span>Select All</span><span class="key">Ctrl+Shift+A</span></div>
+        <div class="item" data-action="search"><span>Find…</span><span class="key">Ctrl+Shift+F</span></div>
+        <div class="sep"></div>
+        <div class="item" data-action="clear"><span>Clear</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-search@0.15.0/lib/addon-search.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.18.0/lib/addon-webgl.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-unicode11@0.8.0/lib/addon-unicode11.min.js"></script>
+  <script>
+    const targetsEl = document.getElementById("targets");
+    const statusEl = document.getElementById("status");
+
+    // A 16-colour ANSI palette so 256-colour / true-colour output reads cleanly.
+    const term = new Terminal({
+      cursorBlink: true,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+      fontSize: 14,
+      scrollback: 10000,
+      allowProposedApi: true,      // search decorations / unicode11
+      macOptionIsMeta: true,
+      theme: {
+        background: "#1e1e1e", foreground: "#d4d4d4",
+        cursor: "#d4d4d4", cursorAccent: "#1e1e1e",
+        selectionBackground: "#264f78", selectionForeground: "#ffffff",
+        black: "#1e1e1e", red: "#f44747", green: "#6a9955", yellow: "#d7ba7d",
+        blue: "#569cd6", magenta: "#c586c0", cyan: "#4ec9b0", white: "#d4d4d4",
+        brightBlack: "#808080", brightRed: "#f44747", brightGreen: "#b5cea8",
+        brightYellow: "#dcdcaa", brightBlue: "#9cdcfe", brightMagenta: "#c586c0",
+        brightCyan: "#4ec9b0", brightWhite: "#ffffff",
+      },
+    });
+
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    const search = new SearchAddon.SearchAddon();
+    term.loadAddon(search);
+    const unicode11 = new Unicode11Addon.Unicode11Addon();
+    term.loadAddon(unicode11);
+    term.unicode.activeVersion = "11";
+
+    term.open(document.getElementById("term"));
+
+    // WebGL renderer with a graceful fall-back to the DOM renderer if the GPU
+    // context is unavailable or lost (e.g. tab backgrounded on some drivers).
+    try {
+      const webgl = new WebglAddon.WebglAddon();
+      webgl.onContextLoss(() => webgl.dispose());
+      term.loadAddon(webgl);
+    } catch (_) { /* DOM renderer remains active */ }
+
+    fit.fit();
+
+    let ws = null;
+    let activeId = null;
+    const encoder = new TextEncoder();
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function sendResize() {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      fit.fit();
+      ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+    }
+
+    function connect(id) {
+      if (ws) { ws.close(); ws = null; }
+      term.reset();
+      activeId = id;
+      renderTargets(lastTargets);
+      startTrace(id); // open the independent trace channel for this target
+
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      ws = new WebSocket(`${proto}://${location.host}/ws?id=${encodeURIComponent(id)}`);
+      ws.binaryType = "arraybuffer";
+
+      ws.onopen = () => {
+        setStatus(`connected: ${id}`);
+        sendResize(); // first control frame syncs the remote PTY immediately
+        term.focus();
+      };
+      ws.onmessage = (ev) => {
+        if (typeof ev.data === "string") return; // control frames are browser→backend only
+        term.write(new Uint8Array(ev.data));
+      };
+      ws.onclose = () => {
+        setStatus(`disconnected: ${id}`);
+        term.write("\r\n\x1b[2m[session closed]\x1b[0m\r\n");
+        ws = null;
+        // The trace channel is independent and keeps running (DESIGN §2).
+      };
+      ws.onerror = () => setStatus(`error: ${id}`);
+    }
+
+    term.onData((data) => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(encoder.encode(data));
+      }
+    });
+
+    window.addEventListener("resize", sendResize);
+
+    // ---- Clipboard --------------------------------------------------------
+    // The Clipboard API only works in a secure context (https or localhost);
+    // over plain http to a LAN IP the browser blocks it, so we surface that.
+    function flash(text) {
+      const prev = statusEl.textContent;
+      setStatus(text);
+      setTimeout(() => { if (statusEl.textContent === text) setStatus(prev); }, 1200);
+    }
+
+    function copySelection() {
+      const sel = term.getSelection();
+      if (!sel) return false;
+      if (!navigator.clipboard?.writeText) { flash("clipboard unavailable (needs https/localhost)"); return false; }
+      navigator.clipboard.writeText(sel).then(() => flash("copied")).catch(() => flash("copy blocked"));
+      return true;
+    }
+
+    async function pasteClipboard() {
+      if (!navigator.clipboard?.readText) { flash("clipboard unavailable (needs https/localhost)"); return; }
+      try {
+        const text = await navigator.clipboard.readText();
+        if (text) { term.paste(text); term.focus(); }   // routed through onData → WS
+      } catch (_) { flash("paste blocked"); }
+    }
+
+    // ---- Search overlay ---------------------------------------------------
+    const searchBox = document.getElementById("search");
+    const searchInput = document.getElementById("search-input");
+    const searchCount = document.getElementById("search-count");
+    const searchOpts = {
+      incremental: true,
+      decorations: {
+        matchBackground: "#5a4a00", matchOverviewRuler: "#d7ba7d",
+        activeMatchBackground: "#f1c40f", activeMatchColorOverviewRuler: "#f1c40f",
+      },
+    };
+    search.onDidChangeResults((r) => {
+      if (!r || r.resultCount === undefined) { searchCount.textContent = ""; return; }
+      if (!r.resultCount) { searchCount.textContent = "no match"; return; }
+      searchCount.textContent = r.resultIndex >= 0
+        ? `${r.resultIndex + 1}/${r.resultCount}` : `${r.resultCount}+`;
+    });
+    function openSearch() {
+      searchBox.classList.add("open");
+      searchInput.value = term.getSelection() || searchInput.value;
+      searchInput.focus();
+      searchInput.select();
+      if (searchInput.value) search.findNext(searchInput.value, searchOpts);
+    }
+    function closeSearch() {
+      searchBox.classList.remove("open");
+      search.clearDecorations();
+      searchCount.textContent = "";
+      term.focus();
+    }
+    function toggleSearch() { searchBox.classList.contains("open") ? closeSearch() : openSearch(); }
+    searchInput.addEventListener("input", () => search.findNext(searchInput.value, searchOpts));
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); e.shiftKey
+        ? search.findPrevious(searchInput.value, searchOpts)
+        : search.findNext(searchInput.value, searchOpts); }
+      else if (e.key === "Escape") { e.preventDefault(); closeSearch(); }
+    });
+    document.getElementById("search-next").onclick = () => search.findNext(searchInput.value, searchOpts);
+    document.getElementById("search-prev").onclick = () => search.findPrevious(searchInput.value, searchOpts);
+    document.getElementById("search-close").onclick = closeSearch;
+
+    // ---- Keyboard shortcuts ----------------------------------------------
+    // Intercept clipboard / search chords before xterm forwards them to the PTY.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown") return true;
+
+      // Primary copy: Ctrl+C *with a selection* copies (then drops the
+      // selection so a second Ctrl+C reaches the shell as SIGINT). Chrome
+      // reserves Ctrl+Shift+C for DevTools, so it cannot be the copy key.
+      // With no selection, Ctrl+C falls through untouched → shell SIGINT.
+      if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && e.code === "KeyC") {
+        if (term.hasSelection()) { copySelection(); term.clearSelection(); e.preventDefault(); return false; }
+        return true;
+      }
+
+      // Chords: Cmd on macOS, or Ctrl+Shift elsewhere (Ctrl+Shift+C still works
+      // in browsers that don't reserve it, e.g. Firefox).
+      const chord = (e.ctrlKey && e.shiftKey) || (e.metaKey && !e.ctrlKey);
+      if (!chord) return true;
+      switch (e.code) {
+        case "KeyC":
+          if (term.hasSelection()) { copySelection(); e.preventDefault(); return false; }
+          return true; // nothing selected: let the key through (e.g. Cmd+C no-op)
+        case "KeyV": pasteClipboard(); e.preventDefault(); return false;
+        case "KeyF": openSearch(); e.preventDefault(); return false;
+        case "KeyA": term.selectAll(); e.preventDefault(); return false;
+        default: return true;
+      }
+    });
+
+    // ---- Right-click context menu ----------------------------------------
+    const menu = document.getElementById("menu");
+    const wrap = document.getElementById("term-wrap");
+    function showMenu(x, y) {
+      menu.querySelector('[data-action="copy"]').setAttribute("aria-disabled", String(!term.hasSelection()));
+      menu.classList.add("open");
+      const r = wrap.getBoundingClientRect();
+      const mx = Math.min(x - r.left, r.width - menu.offsetWidth - 4);
+      const my = Math.min(y - r.top, r.height - menu.offsetHeight - 4);
+      menu.style.left = `${Math.max(0, mx)}px`;
+      menu.style.top = `${Math.max(0, my)}px`;
+    }
+    function hideMenu() { menu.classList.remove("open"); }
+    wrap.addEventListener("contextmenu", (e) => { e.preventDefault(); showMenu(e.clientX, e.clientY); });
+    menu.addEventListener("click", (e) => {
+      const item = e.target.closest(".item");
+      if (!item) return;
+      switch (item.dataset.action) {
+        case "copy": copySelection(); break;
+        case "paste": pasteClipboard(); break;
+        case "selectAll": term.selectAll(); break;
+        case "search": openSearch(); break;
+        case "clear": term.clear(); break;
+      }
+      hideMenu();
+    });
+    document.addEventListener("click", (e) => { if (!menu.contains(e.target)) hideMenu(); });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") hideMenu(); });
+    window.addEventListener("blur", hideMenu);
+
+    // ---- Trace pane -------------------------------------------------------
+    const TRACE_TYPES = ["SYSCALL", "TRACEPOINT", "TTY", "PACKET", "LSM", "LIFECYCLE", "META"];
+    // Shell processes whose housekeeping syscalls are noise (mirrors bloodhound-tui).
+    const SHELL_COMMS = new Set(["bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh", "csh", "sshd"]);
+    // Always kept even from a shell: these show which commands the operator launched.
+    const KEEP_FROM_SHELL = new Set(["execve", "execveat"]);
+    const MAX_TRACE_LINES = 2000;  // DOM cap (ring buffer for display)
+    const RECENT_MAX = 5000;       // in-memory buffer so filter toggles re-render retroactively
+    const logEl = document.getElementById("trace-log");
+    // TTY hidden by default: keystroke echo / prompt redraw storm, and TTY content
+    // duplicates the right pane anyway (DESIGN §7).
+    const hidden = new Set(["TTY"]);
+    let filterText = "";
+    let hideShell = true; // hide shell housekeeping by default; execve always kept
+    let paused = false;
+    let showRaw = false;
+    let recent = [];      // {formatted, raw, etype, comm, name}
+    let traceWorker = null;
+
+    function ensureWorker() {
+      if (traceWorker) return;
+      traceWorker = new Worker("trace-worker.js");
+      traceWorker.onmessage = onTraceMessage;
+    }
+    function startTrace(id) {
+      ensureWorker();
+      clearTraceLog();
+      traceWorker.postMessage({ type: "open", id });
+    }
+
+    function onTraceMessage(e) {
+      const m = e.data;
+      switch (m.type) {
+        case "batch": appendTraceLines(m.lines); break;
+        case "status": renderTraceStatus(m); break;
+        case "conn": /* connection state; status row reflects liveness */ break;
+        case "capture": if (!m.enabled) flash("trace capture unavailable (OPFS)"); break;
+        case "rotated": flash("trace capture rotated (size cap)"); break;
+        case "export-data": downloadExport(m); break;
+      }
+    }
+
+    // matches decides whether an item is shown; capture (OPFS) is never filtered.
+    function matches(it) {
+      if (hidden.has(it.etype)) return false;
+      if (hideShell && SHELL_COMMS.has(it.comm) && !KEEP_FROM_SHELL.has(it.name)) return false;
+      if (filterText && !it.formatted.toLowerCase().includes(filterText)) return false;
+      return true;
+    }
+    // execve/execveat anchor a command's "story"; everything else is a child row.
+    function isCommandItem(it) { return it.name === "execve" || it.name === "execveat"; }
+    function el(tag, cls, txt) {
+      const e = document.createElement(tag);
+      if (cls) e.className = cls;
+      if (txt != null) e.textContent = txt;
+      return e;
+    }
+    function baseName(p) { const s = String(p || ""); const i = s.lastIndexOf("/"); return i >= 0 ? s.slice(i + 1) : s; }
+    // Stable per-process colour so a burst of same-pid events reads as one group.
+    function pidColor(pid) {
+      const n = pid == null ? 0 : (Math.imul(pid, 2654435761) >>> 0);
+      return `hsl(${n % 360} 55% 62%)`;
+    }
+    function iconFor(it) {
+      if (isCommandItem(it)) return "▶";
+      switch (it.etype) {
+        case "TTY": return "⌨";
+        case "PACKET": return "✉";
+        case "LSM": return "🛡";
+        case "LIFECYCLE": return "●";
+      }
+      switch (it.name) {
+        case "openat": case "open": return "📂";
+        case "read": case "pread64": return "📑";
+        case "write": case "pwrite64": return "✎";
+        case "connect": return "✉";
+        case "close": return "✕";
+        default: return "·";
+      }
+    }
+    function rcBadge(rc) {
+      if (rc == null) return null;
+      return el("span", "rc " + (rc < 0 ? "err" : "ok"), (rc < 0 ? "✗" : "✓") + rc);
+    }
+    function procLabel(comm, pid) { return `${comm || "?"}·${pid == null ? "?" : pid}`; }
+
+    function commandRow(it) {
+      const row = el("div", "trace-cmd");
+      row.style.borderLeftColor = pidColor(it.pid);
+      const first = (it.cmd || "").trim().split(/\s+/)[0] || it.comm;
+      row.append(
+        el("span", "ci", "▶"),
+        el("span", "cmd", it.cmd || it.name),
+        el("span", "proc", procLabel(baseName(first), it.pid)),
+        el("span", "time", it.t || ""),
+      );
+      return row;
+    }
+    function childRow(it) {
+      const row = el("div", "trace-ev t-" + (it.etype || "unknown"));
+      row.style.borderLeftColor = pidColor(it.pid);
+      row.append(el("span", "ci", iconFor(it)), el("span", "nm", it.name || it.etype), el("span", "dt", it.detail || ""));
+      const b = rcBadge(it.rc);
+      if (b) row.append(b);
+      row.append(el("span", "proc", procLabel(it.comm, it.pid)));
+      return row;
+    }
+    function lineEl(it) {
+      if (showRaw) return el("div", "trace-line raw", it.raw);
+      return isCommandItem(it) ? commandRow(it) : childRow(it);
+    }
+    function isAtBottom() {
+      return logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 24;
+    }
+    function appendTraceLines(lines) {
+      for (const it of lines) recent.push(it);
+      if (recent.length > RECENT_MAX) recent.splice(0, recent.length - RECENT_MAX);
+      if (paused) return; // freeze the view; recent + the worker's capture keep filling
+      const stick = isAtBottom();
+      for (const it of lines) {
+        if (!matches(it)) continue;
+        logEl.appendChild(lineEl(it));
+      }
+      while (logEl.childElementCount > MAX_TRACE_LINES) logEl.removeChild(logEl.firstChild);
+      if (stick) logEl.scrollTop = logEl.scrollHeight;
+    }
+    // rerender rebuilds the DOM from the in-memory buffer under current filters —
+    // used when a filter, the raw toggle, or resume changes what should be visible.
+    function rerender() {
+      const matched = [];
+      for (let i = recent.length - 1; i >= 0 && matched.length < MAX_TRACE_LINES; i--) {
+        if (matches(recent[i])) matched.push(recent[i]);
+      }
+      matched.reverse();
+      const frag = document.createDocumentFragment();
+      for (const it of matched) frag.appendChild(lineEl(it));
+      logEl.replaceChildren(frag);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+    function clearTraceLog() { recent = []; logEl.replaceChildren(); }
+
+    const aliveEl = document.getElementById("trace-alive");
+    const aliveText = document.getElementById("trace-alive-text");
+    const emittedEl = document.getElementById("trace-emitted");
+    const dropsEl = document.getElementById("trace-drops");
+    function renderTraceStatus(m) {
+      aliveEl.classList.toggle("live", m.alive);
+      aliveEl.classList.toggle("dead", !m.alive);
+      aliveText.textContent = m.alive ? "tracer alive" : "tracer idle";
+      emittedEl.textContent = m.emitted;
+      const total = (m.relayDrops || 0) + (m.tracerDrops || 0);
+      dropsEl.textContent = total;
+      dropsEl.title = `relay ${m.relayDrops || 0} / tracer ${m.tracerDrops || 0}`;
+    }
+
+    // Controls
+    document.getElementById("trace-pause").onclick = (e) => {
+      paused = !paused;
+      e.target.classList.toggle("on", paused);
+      e.target.textContent = paused ? "resume" : "pause";
+      if (!paused) rerender(); // catch up to the latest on resume
+    };
+    document.getElementById("trace-clear").onclick = clearTraceLog;
+    document.getElementById("trace-raw").onclick = (e) => {
+      showRaw = !showRaw;
+      e.target.classList.toggle("on", showRaw);
+      rerender();
+    };
+    document.getElementById("trace-shell").onclick = (e) => {
+      hideShell = !hideShell;
+      e.target.classList.toggle("on", hideShell);
+      rerender();
+    };
+    document.getElementById("trace-filter").oninput = (e) => {
+      filterText = e.target.value.trim().toLowerCase();
+      rerender();
+    };
+    document.getElementById("trace-export").onclick = () => {
+      if (traceWorker) traceWorker.postMessage({ type: "export" });
+    };
+    function downloadExport(m) {
+      if (!m.bytes) { flash("no capture to export"); return; }
+      const blob = new Blob([m.bytes], { type: "application/x-ndjson" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = m.filename || "trace.ndjson";
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    // Type filter menu (TTY starts unchecked — hidden by default)
+    const typesMenu = document.getElementById("trace-types-menu");
+    for (const t of TRACE_TYPES) {
+      const label = document.createElement("label");
+      const cb = document.createElement("input");
+      cb.type = "checkbox"; cb.checked = !hidden.has(t); cb.value = t;
+      cb.onchange = () => { cb.checked ? hidden.delete(t) : hidden.add(t); rerender(); };
+      label.append(cb, document.createTextNode(t));
+      typesMenu.appendChild(label);
+    }
+
+    // ---- Target picker ----------------------------------------------------
+    let lastTargets = [];
+    function renderTargets(targets) {
+      lastTargets = targets;
+      targetsEl.innerHTML = "";
+      for (const t of targets) {
+        const el = document.createElement("div");
+        el.className = "target" + (t.id === activeId ? " active" : "");
+        if (t.status !== "ready") el.setAttribute("disabled", "");
+        el.innerHTML = `<span class="dot ${t.status}"></span><span>${t.label}</span>`;
+        el.title = t.status;
+        if (t.status === "ready") el.onclick = () => connect(t.id);
+        targetsEl.appendChild(el);
+      }
+    }
+
+    async function refreshTargets() {
+      try {
+        const res = await fetch("/api/targets");
+        const targets = await res.json();
+        renderTargets(targets);
+        if (!activeId) {
+          const ready = targets.filter((t) => t.status === "ready").length;
+          setStatus(ready ? "select a target" : "targets booting…");
+        }
+      } catch (e) {
+        setStatus("cannot reach BFF");
+      }
+    }
+
+    refreshTargets();
+    // Poll the fleet status on a fixed cadence; status keeps reflecting changes.
+    setInterval(refreshTargets, 3000);
+  </script>
+</body>
+</html>

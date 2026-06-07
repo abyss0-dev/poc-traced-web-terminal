@@ -1,0 +1,79 @@
+#cloud-config
+hostname: vm1
+fqdn: vm1
+ssh_pwauth: true
+disable_root: false
+users:
+  - name: poc
+    uid: 1000
+    plain_text_passwd: poc
+    lock_passwd: false
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    groups: [sudo]
+  # watcher: the read-only trace account. Its login uid (2000) differs from the
+  # operator's (1000) so the trace tail falls outside bloodhound's auid filter and
+  # cannot drive the observer feedback loop (DESIGN §9). No sudo — it only reads
+  # the world-readable NDJSON and, via the systemd-journal group, the bloodhound
+  # journal for the trace-readiness health gate (DESIGN §10).
+  - name: watcher
+    uid: 2000
+    plain_text_passwd: watch
+    lock_passwd: false
+    shell: /bin/bash
+    groups: [systemd-journal]
+chpasswd:
+  expire: false
+  users:
+    - name: poc
+      password: poc
+      type: text
+    - name: watcher
+      password: watch
+      type: text
+write_files:
+  # Pre-create the NDJSON sink world-readable so the watcher can tail it without
+  # privilege; systemd's append: sink writes here (it would otherwise create the
+  # file root:root 0644 on first write — this just makes the mode explicit).
+  - path: /var/log/bloodhound.ndjson
+    owner: root:root
+    permissions: '0644'
+    content: ''
+  # bloodhound static binary, injected at seed-build time by fetch-image.sh.
+  # The placeholder line below is replaced with the gzip+base64 of the binary.
+  - path: /usr/local/bin/bloodhound
+    owner: root:root
+    permissions: '0755'
+    encoding: gz+b64
+    content: |
+      @@BLOODHOUND_GZ_B64@@
+  - path: /etc/systemd/system/bloodhound.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=bloodhound eBPF behavioral tracer
+      Documentation=https://github.com/abyss0-dev/bloodhound
+      After=network.target
+
+      [Service]
+      Type=simple
+      # bloodhound logs via env_logger, which defaults to ERROR when RUST_LOG is
+      # unset — that mutes the runtime BTF-offset resolution line and, worse, the
+      # warn! fallback guardrail (#37). Surface info+ so the resolved offsets are
+      # visible in journalctl and a bad-offset fallback fails loud, not silent.
+      Environment=RUST_LOG=info
+      # uid is resolved at start so the filter tracks the poc login user even if
+      # its uid ever drifts from 1000. NDJSON events go to the log file; daemon
+      # diagnostics go to the journal (journalctl -u bloodhound).
+      ExecStart=/bin/sh -c 'exec /usr/local/bin/bloodhound --uid "$(id -u poc)" --exclude-ports 22'
+      Restart=on-failure
+      RestartSec=2
+      StandardOutput=append:/var/log/bloodhound.ndjson
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+runcmd:
+  - [ systemctl, daemon-reload ]
+  - [ systemctl, enable, --now, bloodhound.service ]

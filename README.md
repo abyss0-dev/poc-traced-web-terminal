@@ -1,5 +1,7 @@
 # Traced Web Terminal (PoC)
 
+![Traced Web Terminal in action — live in-VM eBPF trace, command-grouped, on the left; the interactive terminal on the right.](docs/demo.png)
+
 A superset of `poc/web-terminal`: the same browser → **BFF** → **Gateway (GW)** →
 QEMU pipeline, plus a second, read-only **trace channel** that streams each
 guest's kernel-level behavior — captured in-VM by the **bloodhound** eBPF tracer
